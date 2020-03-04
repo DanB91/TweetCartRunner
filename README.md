@@ -4,13 +4,13 @@ This is the source code used by the twitter bot, [@TweetCartRunner](https://twit
 
 
 # Requirements
----
+
 - golang compiler -- Tested on 1.13, but should work on 1.11 and up.
 - Linux -- Tested on Ubuntu 18.04.
 - PICO-8 -- Tested on 0.1.12C
 
 # Compilation and Setup
----
+
 Compiliation has been tested on Go 1.13, but should work for 1.11 and up. I have only tested this on Linux, but in theory should work all OSs that support Go and PICO-8.  The only caveat right now is that your PICO-8 binary has to be in a folder called `pico-8-linux` or `pico-8-rpi` and the executable has to be called pico8. Running this on macOS would probably require code changes due to the .app folder structure. Here are steps to compile and setup the bot:
 
 
@@ -39,7 +39,7 @@ token secret
 - Now the bot is ready to run.  See the [Usage](#usage) section.
 
 # Usage
----
+
 `./twitter_pico8 file_containing_api_keys number_of_concurrent_tweetcart_handlers [log_file_name]`
 
 - `file_containing_api_keys` -- This is the text file that contains your Twitter app's API keys.  This is the `keys.txt` created in the [Compilation and Setup](#compilation-and-setup]) section.
@@ -68,5 +68,5 @@ When the bot is brought up, it will check for this file.  If it exists, it will 
 If the `persistent_state.json` doesn't exist the bot will just start up with out checking for any previous mentions.
 
 # Contact
----
+
 If you have any questions or concerns related to this software feel free to DM me on Twitter @dbokser91 or email me at tweetcartrunner@yahoo.com and I'll try to respond in a timely manner.
