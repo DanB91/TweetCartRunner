@@ -93,6 +93,80 @@ type DirectMessageEventsNewParams struct {
 	Event *DirectMessageEvent `json:"event"`
 }
 
+////
+//Added by Daniel Bokser
+type DirectMessageWelcomeMessageNewParams struct {
+	MessageData DirectMessageData `json:"message_data"`
+	Name        string            `json:"name,omitempty"`
+}
+type DirectMessageWelcomeMessage struct {
+	ID               string            `json:"id"`
+	CreatedTimeStamp string            `json:"created_timestamp"`
+	MessageData      DirectMessageData `json:"message_data"`
+	Name             string            `json:"name"`
+}
+
+func (s *DirectMessageService) WelcomeMessageNew(params *DirectMessageWelcomeMessageNewParams) (*DirectMessageWelcomeMessage, *http.Response, error) {
+	wrap_params := struct {
+		WelcomeMessageParams *DirectMessageWelcomeMessageNewParams `json:"welcome_message"`
+	}{WelcomeMessageParams: params}
+	wrap_return := struct {
+		WelcomeMessage *DirectMessageWelcomeMessage `json:"welcome_message"`
+	}{}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Post("welcome_messages/new.json").BodyJSON(&wrap_params).Receive(&wrap_return, apiError)
+	return wrap_return.WelcomeMessage, resp, relevantError(err, *apiError)
+}
+
+type DirectMessageWelcomeMessageListParams struct {
+	Cursor string `url:"cursor,omitempty"`
+	Count  int    `url:"count,omitempty"`
+}
+
+type DirectMessageWelcomeMessages struct {
+	WelcomeMessages []DirectMessageWelcomeMessage `json:"welcome_messages"`
+	NextCursor      string                        `json:"next_cursor"`
+}
+
+func (s *DirectMessageService) WelcomeMessageList(params *DirectMessageWelcomeMessageListParams) (*DirectMessageWelcomeMessages, *http.Response, error) {
+	messages := &DirectMessageWelcomeMessages{}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Get("welcome_messages/list.json").QueryStruct(params).Receive(messages, apiError)
+	return messages, resp, relevantError(err, *apiError)
+}
+
+func (s *DirectMessageService) WelcomeMessageDestroy(id string) (*http.Response, error) {
+	params := struct {
+		ID string `url:"id,omitempty"`
+	}{id}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Delete("welcome_messages/destroy.json").QueryStruct(params).Receive(nil, apiError)
+	return resp, relevantError(err, *apiError)
+}
+
+type DirectMessageWelcomeMessageRule struct {
+	ID               string `json:"id"`
+	CreatedTimeStamp string `json:"created_timestamp"`
+	WelcomeMessageID string `json:"welcome_message_id"`
+}
+
+func (s *DirectMessageService) WelcomeMessageRuleNew(id string) (*DirectMessageWelcomeMessageRule, *http.Response, error) {
+	type Rule struct {
+		ID string `json:"welcome_message_id"`
+	}
+	params := struct {
+		Rule Rule `json:"welcome_message_rule"`
+	}{Rule: Rule{ID: id}}
+	wrap := struct {
+		Rule DirectMessageWelcomeMessageRule `json:"welcome_message_rule"`
+	}{}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Post("welcome_messages/rules/new.json").BodyJSON(params).Receive(&wrap, apiError)
+	return &wrap.Rule, resp, relevantError(err, *apiError)
+}
+
+////END
+
 // EventsNew publishes a new Direct Message event and returns the event.
 // Requires a user auth context with DM scope.
 // https://developer.twitter.com/en/docs/direct-messages/sending-and-receiving/api-reference/new-event
