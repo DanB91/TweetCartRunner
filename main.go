@@ -35,6 +35,11 @@ const (
 	PTS_STATE_PERSISTED = iota
 )
 
+type CartTweet struct {
+	tweet_id        int64
+	parent_tweet_id int64
+}
+
 func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64, persistent_state *TweetCartRunnerPersistentState, status_channel chan<- int, file_name string) {
 	needs_persist := false
 	for {
@@ -101,11 +106,14 @@ func load_persistent_state_file(file_name string) *TweetCartRunnerPersistentStat
 	return &persistent_state
 }
 
-func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunnerPersistentState, ctx context.Context, processing_tweet_semaphore *semaphore.Weighted, tweet_ids_in_progress chan int64, processed_tweet_ids chan int64) {
+func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunnerPersistentState,
+	cart_tweet_channel chan CartTweet) {
 	log.Print("Loading missed tweets...")
+	cart_tweet := CartTweet{}
 	for tweet_id, _ := range persistent_state.TweetIDsInProgress {
-		tweet_ids_in_progress <- tweet_id
-		go handle_tweet(tweet_id, tweet_id, tc, ctx, processing_tweet_semaphore, processed_tweet_ids)
+		cart_tweet.tweet_id = tweet_id
+		cart_tweet.parent_tweet_id = tweet_id
+		cart_tweet_channel <- cart_tweet
 	}
 	if persistent_state.LastTweetID == 0 {
 		log.Print("Done!")
@@ -155,8 +163,9 @@ func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunner
 				tweet_id = tweet.ID
 			}
 
-			tweet_ids_in_progress <- tweet.ID
-			go handle_tweet(tweet_id, tweet.ID, tc, ctx, processing_tweet_semaphore, processed_tweet_ids)
+			cart_tweet.tweet_id = tweet_id
+			cart_tweet.parent_tweet_id = tweet.ID
+			cart_tweet_channel <- cart_tweet
 
 			if tweet.ID > last_tweet_id {
 				last_tweet_id = tweet.ID
@@ -194,6 +203,26 @@ func load_keys_file(keys_file_name string) (string, string, string, string) {
 
 	return consumer_key, consumer_secret, token, token_secret
 }
+func run_tweet_cart_thread(cart_tweet_channel chan CartTweet,
+	tweet_ids_in_progress_channel chan int64, processed_tweet_ids_channel chan int64,
+	twitter_client *twitter.Client,
+	goroutine_context context.Context, processing_tweet_semaphore *semaphore.Weighted) {
+
+	for tweet := range cart_tweet_channel {
+		if err := processing_tweet_semaphore.Acquire(goroutine_context, 1); err != nil {
+			log.Print("Error acquiring semaphore: ", err)
+			continue
+		}
+
+		go func() {
+			tweet_ids_in_progress_channel <- tweet.parent_tweet_id
+			handle_tweet(tweet.tweet_id, tweet.parent_tweet_id, twitter_client)
+			processed_tweet_ids_channel <- tweet.parent_tweet_id
+			processing_tweet_semaphore.Release(1)
+		}()
+	}
+
+}
 
 func main() {
 
@@ -208,16 +237,16 @@ func main() {
 	config := oauth1.NewConfig(conusmer_key, consumer_secret)
 	token := oauth1.NewToken(token_str, token_secret)
 
-	ctx := context.Background()
+	goroutine_context := context.Background()
 	processing_tweet_semaphore := semaphore.NewWeighted(NUMBER_OF_CONCURRENT_CART_HANDLERS)
 
 	// http_client will automatically authorize http.Request's
 	http_client := config.Client(oauth1.NoContext, token)
-	tc := twitter.NewClient(http_client)
+	twitter_client := twitter.NewClient(http_client)
 	//log on
 	user_name := ""
 	logon_func := func() (interface{}, error) {
-		user, _, err := tc.Accounts.VerifyCredentials(nil)
+		user, _, err := twitter_client.Accounts.VerifyCredentials(nil)
 		return user, err
 	}
 	user_int, _ := execute_twitter_api(logon_func, "Could not log on to twitter", true)
@@ -225,7 +254,7 @@ func main() {
 	user_name = my_user.ScreenName
 	log.Print("Logged on as ", my_user.ScreenName)
 
-	init_dm_listener(consumer_secret, http_client, tc, my_user, ctx, processing_tweet_semaphore)
+	init_dm_listener(consumer_secret, http_client, twitter_client, my_user, goroutine_context, processing_tweet_semaphore)
 
 	for {
 
@@ -241,19 +270,25 @@ func main() {
 			Track:         []string{"@" + user_name},
 		}
 
-		stream, err := tc.Streams.Filter(filter_params)
+		stream, err := twitter_client.Streams.Filter(filter_params)
 		if err != nil {
 			log.Fatal("Could not get stream.  Reason: ", err)
 		}
 
 		persistent_state_file_name := "persistent_state.json"
 		persistent_state := load_persistent_state_file(persistent_state_file_name)
-		tweet_ids_in_progress := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
-		processed_tweet_ids := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+		tweet_ids_in_progress_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+		processed_tweet_ids_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
 
-		go perstisting_thread(tweet_ids_in_progress, processed_tweet_ids, persistent_state, nil, persistent_state_file_name)
-		process_missed_tweets(tc, persistent_state, ctx, processing_tweet_semaphore, tweet_ids_in_progress, processed_tweet_ids)
+		go perstisting_thread(tweet_ids_in_progress_channel, processed_tweet_ids_channel, persistent_state, nil, persistent_state_file_name)
 
+		cart_tweet_channel := make(chan CartTweet, 256)
+		go run_tweet_cart_thread(cart_tweet_channel, tweet_ids_in_progress_channel, processed_tweet_ids_channel,
+			twitter_client, goroutine_context, processing_tweet_semaphore)
+
+		process_missed_tweets(twitter_client, persistent_state, cart_tweet_channel)
+
+		cart_tweet := CartTweet{}
 		for message := range stream.Messages {
 			switch msg := message.(type) {
 			case *twitter.Tweet:
@@ -271,9 +306,10 @@ func main() {
 				} else {
 					tweet_id = msg.ID
 				}
+				cart_tweet.tweet_id = tweet_id
+				cart_tweet.parent_tweet_id = msg.ID
+				cart_tweet_channel <- cart_tweet
 
-				tweet_ids_in_progress <- msg.ID
-				go handle_tweet(tweet_id, msg.ID, tc, ctx, processing_tweet_semaphore, processed_tweet_ids)
 			default:
 				log.Printf("Generic handler -- type: %T -- %v", msg, msg)
 			}
@@ -395,14 +431,7 @@ func upload_gif(gif_data []byte, tc *twitter.Client) (int64, error) {
 
 }
 
-func handle_tweet(tweet_id int64, tweet_id_to_persist int64, tc *twitter.Client, ctx context.Context, processing_tweet_semaphore *semaphore.Weighted, processed_tweet_ids chan int64) {
-	if err := processing_tweet_semaphore.Acquire(ctx, 1); err != nil {
-		log.Print("Failed to acquire semaphore.  Reason: ", err)
-		return
-	}
-	defer processing_tweet_semaphore.Release(1)
-	defer func() { processed_tweet_ids <- tweet_id_to_persist }()
-
+func handle_tweet(tweet_id int64, tweet_id_to_persist int64, tc *twitter.Client) {
 	var (
 		err   error
 		tweet *twitter.Tweet
@@ -436,10 +465,7 @@ func handle_tweet(tweet_id int64, tweet_id_to_persist int64, tc *twitter.Client,
 			return indicies_to_remove[i][1] < indicies_to_remove[i][0]
 		})
 	}
-	sanitized_tweet, err := sanitize_tweet_text(tweet.FullText, indicies_to_remove)
-	if err != nil {
-		return
-	}
+	sanitized_tweet := sanitize_tweet_text(tweet.FullText, indicies_to_remove)
 	//log.Print("Sanitized tweet: ", sanitized_tweet)
 
 	gif_data, err := run_pico8_and_generate_gif(sanitized_tweet, tweet.IDStr)
@@ -476,50 +502,6 @@ I was unable to generate the GIF of your tweetcart. Possible reasons:
 		return
 	}
 
-	// api_func = func() (interface{}, error) {
-	// 	upload_result, _, err := tc.Media.Upload(gif_data, "image/gif", "tweet_gif")
-	// 	return upload_result, err
-	// }
-	// upload_result_int, err := execute_twitter_api(api_func, fmt.Sprintf("Error uploading gif for tweet id: %v", tweet.IDStr), false)
-	// if err != nil {
-	// 	return
-	// }
-	// upload_result := upload_result_int.(*twitter.MediaUploadResult)
-
-	// if upload_result.ProcessingInfo != nil {
-	// 	log.Print("Upload of gif not finished yet.  Checking again in ", upload_result.ProcessingInfo.CheckAfterSecs, " seconds")
-	// 	for retry := true; retry; {
-	// 		time.Sleep(time.Duration(upload_result.ProcessingInfo.CheckAfterSecs) * time.Second)
-	// 		media_status_result, _, err := tc.Media.Status(upload_result.MediaID)
-	// 		if err != nil {
-	// 			if is_retriable_error(err) {
-	// 				log.Print("Error checking status of uploaded media: ", err)
-	// 				//lets retry again
-	// 				continue
-	// 			} else {
-	// 				log.Print("Error checking status of uploaded media. Bailing out... Reason: ", err)
-	// 				return
-	// 			}
-	// 		}
-
-	// 		switch media_status_result.ProcessingInfo.State {
-	// 		case "succeeded":
-	// 		case "pending":
-	// 			fallthrough
-	// 		case "in_progress":
-	// 			//check status again
-	// 			continue
-	// 		case "failed":
-	// 			log.Print("Failed to upload gif for tweet id: ", tweet.IDStr, " Reason: ", media_status_result.ProcessingInfo.Error.Message)
-	// 			return
-	// 		default:
-	// 			log.Print("Unknown media upload state ", media_status_result.ProcessingInfo.State, ".  Bailing out")
-	// 			return
-	// 		}
-	// 		retry = false
-	// 	}
-
-	// }
 	gif_id, err := upload_gif(gif_data, tc)
 	if err != nil {
 		log.Print(err)
@@ -689,7 +671,7 @@ finish()`,
 var INCLUDE_REGEX = regexp.MustCompile(`(?m)^\s*#include\s\S*`)
 
 //Indices to remove must be sorted
-func sanitize_tweet_text(text string, indices_to_remove []twitter.Indices) (string, error) {
+func sanitize_tweet_text(text string, indices_to_remove []twitter.Indices) string {
 	sanitized_tweet := ""
 	current_indices_index := 0
 	var indices *twitter.Indices = nil
@@ -698,6 +680,7 @@ func sanitize_tweet_text(text string, indices_to_remove []twitter.Indices) (stri
 	}
 	is_currently_in_string := false
 	head_quote := rune(0)
+
 	for i, c := range []rune(text) {
 		switch c {
 		case '”':
@@ -739,5 +722,10 @@ func sanitize_tweet_text(text string, indices_to_remove []twitter.Indices) (stri
 	sanitized_tweet = strings.ReplaceAll(sanitized_tweet, "&amp;", "&")
 	sanitized_tweet = INCLUDE_REGEX.ReplaceAllLiteralString(sanitized_tweet, "")
 
-	return sanitized_tweet, nil
+	sanitized_tweet = strings.TrimSpace(sanitized_tweet)
+	if sanitized_tweet[0] == '.' {
+		sanitized_tweet = sanitized_tweet[1:]
+	}
+
+	return sanitized_tweet
 }

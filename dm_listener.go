@@ -60,19 +60,21 @@ type DMCart struct {
 	sender  User
 }
 
-type WebhookHandler struct {
+type DMHanderContext struct {
 	consumer_secret            []byte
-	ctx                        context.Context
+	goroutine_context          context.Context
 	program_handling_semaphore *semaphore.Weighted
 	twitter_client             *twitter.Client
 	this_user                  *twitter.User
+	dm_channel                 chan DMCart
 }
 
-func (handler *WebhookHandler) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
+func (dm_context *DMHanderContext) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 	buf := bytes.Buffer{}
 	if req.ContentLength > 0 {
 		buf.Grow(int(req.ContentLength))
 	}
+	dm_cart := DMCart{}
 
 	_, err := buf.ReadFrom(req.Body)
 	if err != nil {
@@ -86,7 +88,7 @@ func (handler *WebhookHandler) ServeHTTP(writer http.ResponseWriter, req *http.R
 			return
 		}
 		token := []byte(token_slice[0])
-		hash := hmac.New(sha256.New, handler.consumer_secret)
+		hash := hmac.New(sha256.New, dm_context.consumer_secret)
 		if _, err := hash.Write(token); err != nil {
 			log.Println("Could not hash crc_token!  Error:", err)
 			writer.WriteHeader(http.StatusInternalServerError)
@@ -113,18 +115,33 @@ func (handler *WebhookHandler) ServeHTTP(writer http.ResponseWriter, req *http.R
 			continue
 		}
 
-		if sender.ScreenName == handler.this_user.ScreenName {
+		if sender.ScreenName == dm_context.this_user.ScreenName {
 			continue
 		}
-		var (
-			dm_text string = dm_event.Message.MessageData.Text
-			dm_id   string = DM_ID_PREFIX + dm_event.Id
-		)
-		//TODO use a channel to send this data over so we can have a bounded number of threads
-		go handle_dm(dm_id, dm_text, sender, handler)
+		dm_cart.dm_text = dm_event.Message.MessageData.Text
+		dm_cart.dm_id = DM_ID_PREFIX + dm_event.Id
+		dm_cart.sender = sender
+		dm_context.dm_channel <- dm_cart
 	}
 
 	writer.WriteHeader(http.StatusOK)
+}
+
+func dm_event_loop(dm_context *DMHanderContext) {
+	for dm_cart := range dm_context.dm_channel {
+		err := dm_context.program_handling_semaphore.Acquire(dm_context.goroutine_context, 1)
+		if err != nil {
+			log.Print("Error acquiring semaphore: ", err)
+			continue
+		}
+		go func() {
+			//TODO
+			// handler.dm_ids_in_process <- dm_id
+			handle_dm(dm_cart.dm_id, dm_cart.dm_text, dm_cart.sender, dm_context)
+			dm_context.program_handling_semaphore.Release(1)
+			// handler.processed_dm_ids <- dm_id
+		}()
+	}
 }
 
 //returns true if successful, else false
@@ -189,8 +206,6 @@ func divide_cart_up_into_tweets(cart, my_screen_name string) []string {
 	tag_str_len := 1 + len(my_screen_name) + 1 // @-sign, screen name, space
 	if len(cart)+tag_str_len <= MAX_TWEET_CHARS {
 		tweet := fmt.Sprintf("@%v %v", my_screen_name, cart)
-		//TODO remove!
-		assert(len(tweet) <= MAX_TWEET_CHARS, "Tweet too large")
 		return []string{tweet}
 	}
 	tweet_counter_len := 2 + 5 // double-dash, double digit counter
@@ -223,23 +238,10 @@ func divide_cart_up_into_tweets(cart, my_screen_name string) []string {
 	return tweets
 
 }
-func handle_dm(dm_id, dm_text string, sender User, handler *WebhookHandler) {
+func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 	go send_dm("Your code is being run.  I will DM you once it's finished!", sender, handler.twitter_client)
 
-	if err := handler.program_handling_semaphore.Acquire(handler.ctx, 1); err != nil {
-		log.Print("Failed to acquire semaphore.  Reason: ", err)
-		return
-	}
-	//TODO
-	// handler.dm_ids_in_process <- dm_id
-	defer handler.program_handling_semaphore.Release(1)
-	// defer func() { handler.processed_dm_ids <- dm_id }()
-
-	sanitized_text, err := sanitize_tweet_text(dm_text, nil)
-	if err != nil {
-		log.Printf("Failed to sanitize DM. Dropping... Reason: %v", err)
-		return
-	}
+	sanitized_text := sanitize_tweet_text(dm_text, nil)
 	gif_data, err := run_pico8_and_generate_gif(sanitized_text, dm_id)
 	if err != nil {
 		msg := `I was unable to generate the GIF of your program. Possible reasons:
@@ -458,16 +460,19 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 		register_welcome_message(twitter_client)
 	}
 
-	handler := WebhookHandler{
+	dm_context := DMHanderContext{
 		consumer_secret:            []byte(consumer_secret),
-		ctx:                        ctx,
+		goroutine_context:          ctx,
 		program_handling_semaphore: program_handling_semaphore,
 		twitter_client:             twitter_client,
 		this_user:                  this_user,
+		dm_channel:                 make(chan DMCart, 256),
 	}
 
+	go dm_event_loop(&dm_context)
+
 	mux := http.NewServeMux()
-	mux.Handle(WEBHOOK_PATH, &handler)
+	mux.Handle(WEBHOOK_PATH, &dm_context)
 
 	listener, err := net.Listen("tcp", ":12345")
 	cfg := &tls.Config{
@@ -514,7 +519,4 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 
 	log.Printf("Ready to listen for DMs!")
 
-	//TODO: remove!
-	wait := make(chan struct{})
-	<-wait
 }
