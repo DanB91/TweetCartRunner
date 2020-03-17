@@ -27,7 +27,8 @@ import (
 type TweetCartRunnerPersistentState struct {
 	LastTweetID        int64
 	TweetIDsInProgress map[int64]bool
-	//TODO
+	LastDMID           int64
+	DMsInProgress      map[string]*DMCart
 }
 
 const (
@@ -35,12 +36,14 @@ const (
 	PTS_STATE_PERSISTED = iota
 )
 
-type CartTweet struct {
+type TweetCart struct {
 	tweet_id        int64
 	parent_tweet_id int64
 }
 
-func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64, persistent_state *TweetCartRunnerPersistentState, status_channel chan<- int, file_name string) {
+func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64,
+	dms_in_progress <-chan *DMCart, processed_dm_ids <-chan string,
+	persistent_state *TweetCartRunnerPersistentState, status_channel chan<- int, file_name string) {
 	needs_persist := false
 	for {
 		if needs_persist {
@@ -53,6 +56,16 @@ func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64,
 					persistent_state.LastTweetID = tweet_id
 				}
 				delete(persistent_state.TweetIDsInProgress, tweet_id)
+				needs_persist = true
+			case dm_id := <-processed_dm_ids:
+				dm_id_num := dm_id_to_int(dm_id)
+				if dm_id_num > persistent_state.LastDMID {
+					persistent_state.LastDMID = dm_id_num
+				}
+				delete(persistent_state.DMsInProgress, dm_id)
+				needs_persist = true
+			case dm_cart := <-dms_in_progress:
+				persistent_state.DMsInProgress[dm_cart.DMID] = dm_cart
 				needs_persist = true
 			default:
 				//persist file
@@ -75,7 +88,6 @@ func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64,
 		} else {
 			select {
 			case tweet_id := <-tweet_ids_in_progress:
-
 				persistent_state.TweetIDsInProgress[tweet_id] = true
 				needs_persist = true
 			case tweet_id := <-processed_tweet_ids:
@@ -83,6 +95,16 @@ func perstisting_thread(tweet_ids_in_progress, processed_tweet_ids <-chan int64,
 					persistent_state.LastTweetID = tweet_id
 				}
 				delete(persistent_state.TweetIDsInProgress, tweet_id)
+				needs_persist = true
+			case dm_id := <-processed_dm_ids:
+				dm_id_num := dm_id_to_int(dm_id)
+				if dm_id_num > persistent_state.LastDMID {
+					persistent_state.LastDMID = dm_id_num
+				}
+				delete(persistent_state.DMsInProgress, dm_id)
+				needs_persist = true
+			case dm_cart := <-dms_in_progress:
+				persistent_state.DMsInProgress[dm_cart.DMID] = dm_cart
 				needs_persist = true
 			}
 
@@ -103,13 +125,17 @@ func load_persistent_state_file(file_name string) *TweetCartRunnerPersistentStat
 		persistent_state.TweetIDsInProgress = make(map[int64]bool)
 	}
 
+	if persistent_state.DMsInProgress == nil {
+		persistent_state.DMsInProgress = make(map[string]*DMCart, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+	}
+
 	return &persistent_state
 }
 
-func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunnerPersistentState,
-	cart_tweet_channel chan CartTweet) {
+func process_missed_tweets(tc *twitter.Client, my_user *twitter.User, persistent_state *TweetCartRunnerPersistentState,
+	cart_tweet_channel chan TweetCart) {
 	log.Print("Loading missed tweets...")
-	cart_tweet := CartTweet{}
+	cart_tweet := TweetCart{}
 	for tweet_id, _ := range persistent_state.TweetIDsInProgress {
 		cart_tweet.tweet_id = tweet_id
 		cart_tweet.parent_tweet_id = tweet_id
@@ -120,7 +146,7 @@ func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunner
 		return
 	}
 
-	const buffer_size = 20
+	const buffer_size = 50
 	total_loaded_tweets := 0
 	last_tweet_id := persistent_state.LastTweetID
 	for {
@@ -156,6 +182,12 @@ func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunner
 				}
 				continue
 			}
+			if tweet.User.IDStr == my_user.IDStr {
+				if tweet.ID > last_tweet_id {
+					last_tweet_id = tweet.ID
+				}
+				continue
+			}
 			var tweet_id int64
 			if tweet.InReplyToStatusID != 0 && tweet.InReplyToUserID == tweet.User.ID {
 				tweet_id = tweet.InReplyToStatusID
@@ -170,10 +202,10 @@ func process_missed_tweets(tc *twitter.Client, persistent_state *TweetCartRunner
 			if tweet.ID > last_tweet_id {
 				last_tweet_id = tweet.ID
 			}
+			total_loaded_tweets++
 
 		}
 
-		total_loaded_tweets += len(tweets)
 	}
 }
 func setup_logging(log_file_name string) *os.File {
@@ -203,7 +235,7 @@ func load_keys_file(keys_file_name string) (string, string, string, string) {
 
 	return consumer_key, consumer_secret, token, token_secret
 }
-func run_tweet_cart_thread(cart_tweet_channel chan CartTweet,
+func run_tweet_cart_thread(cart_tweet_channel chan TweetCart,
 	tweet_ids_in_progress_channel chan int64, processed_tweet_ids_channel chan int64,
 	twitter_client *twitter.Client,
 	goroutine_context context.Context, processing_tweet_semaphore *semaphore.Weighted) {
@@ -213,11 +245,11 @@ func run_tweet_cart_thread(cart_tweet_channel chan CartTweet,
 			log.Print("Error acquiring semaphore: ", err)
 			continue
 		}
-
+		tmp_tweet := tweet
 		go func() {
-			tweet_ids_in_progress_channel <- tweet.parent_tweet_id
-			handle_tweet(tweet.tweet_id, tweet.parent_tweet_id, twitter_client)
-			processed_tweet_ids_channel <- tweet.parent_tweet_id
+			tweet_ids_in_progress_channel <- tmp_tweet.tweet_id
+			handle_tweet(tmp_tweet.parent_tweet_id, twitter_client)
+			processed_tweet_ids_channel <- tmp_tweet.tweet_id
 			processing_tweet_semaphore.Release(1)
 		}()
 	}
@@ -225,6 +257,7 @@ func run_tweet_cart_thread(cart_tweet_channel chan CartTweet,
 }
 
 func main() {
+	load_args()
 
 	if len(LOGFILE_NAME) > 0 {
 		if f := setup_logging(LOGFILE_NAME); f != nil {
@@ -254,7 +287,27 @@ func main() {
 	user_name = my_user.ScreenName
 	log.Print("Logged on as ", my_user.ScreenName)
 
-	init_dm_listener(consumer_secret, http_client, twitter_client, my_user, goroutine_context, processing_tweet_semaphore)
+	dms_in_progress_channel := make(chan *DMCart, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+	processed_dm_ids_channel := make(chan string, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+	persistent_state_file_name := "persistent_state.json"
+	persistent_state := load_persistent_state_file(persistent_state_file_name)
+	tweet_ids_in_progress_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+	processed_tweet_ids_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
+
+	go perstisting_thread(tweet_ids_in_progress_channel, processed_tweet_ids_channel,
+		dms_in_progress_channel, processed_dm_ids_channel,
+		persistent_state, nil, persistent_state_file_name)
+
+	cart_tweet_channel := make(chan TweetCart, 256)
+	go run_tweet_cart_thread(cart_tweet_channel, tweet_ids_in_progress_channel, processed_tweet_ids_channel,
+		twitter_client, goroutine_context, processing_tweet_semaphore)
+
+	process_missed_tweets(twitter_client, my_user, persistent_state, cart_tweet_channel)
+
+	init_dm_listener(consumer_secret, http_client, twitter_client, my_user,
+		dms_in_progress_channel, processed_dm_ids_channel,
+		persistent_state,
+		goroutine_context, processing_tweet_semaphore)
 
 	for {
 
@@ -275,20 +328,7 @@ func main() {
 			log.Fatal("Could not get stream.  Reason: ", err)
 		}
 
-		persistent_state_file_name := "persistent_state.json"
-		persistent_state := load_persistent_state_file(persistent_state_file_name)
-		tweet_ids_in_progress_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
-		processed_tweet_ids_channel := make(chan int64, NUMBER_OF_CONCURRENT_CART_HANDLERS)
-
-		go perstisting_thread(tweet_ids_in_progress_channel, processed_tweet_ids_channel, persistent_state, nil, persistent_state_file_name)
-
-		cart_tweet_channel := make(chan CartTweet, 256)
-		go run_tweet_cart_thread(cart_tweet_channel, tweet_ids_in_progress_channel, processed_tweet_ids_channel,
-			twitter_client, goroutine_context, processing_tweet_semaphore)
-
-		process_missed_tweets(twitter_client, persistent_state, cart_tweet_channel)
-
-		cart_tweet := CartTweet{}
+		cart_tweet := TweetCart{}
 		for message := range stream.Messages {
 			switch msg := message.(type) {
 			case *twitter.Tweet:
@@ -300,14 +340,14 @@ func main() {
 					//do not process tweets from myself!
 					continue
 				}
-				var tweet_id int64
+				var parent_tweet_id int64
 				if msg.InReplyToStatusID != 0 && msg.InReplyToUserID == msg.User.ID {
-					tweet_id = msg.InReplyToStatusID
+					parent_tweet_id = msg.InReplyToStatusID
 				} else {
-					tweet_id = msg.ID
+					parent_tweet_id = msg.ID
 				}
-				cart_tweet.tweet_id = tweet_id
-				cart_tweet.parent_tweet_id = msg.ID
+				cart_tweet.tweet_id = msg.ID
+				cart_tweet.parent_tweet_id = parent_tweet_id
 				cart_tweet_channel <- cart_tweet
 
 			default:
@@ -431,7 +471,7 @@ func upload_gif(gif_data []byte, tc *twitter.Client) (int64, error) {
 
 }
 
-func handle_tweet(tweet_id int64, tweet_id_to_persist int64, tc *twitter.Client) {
+func handle_tweet(tweet_id int64, tc *twitter.Client) {
 	var (
 		err   error
 		tweet *twitter.Tweet

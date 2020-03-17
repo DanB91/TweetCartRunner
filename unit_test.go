@@ -185,25 +185,22 @@ func TestSanitizeTweet(t *testing.T) {
 	{
 		expected := "s=' @TweetCartRunner '\n  "
 		indices := []twitter.Indices{twitter.Indices{4, 20}}
-		actual, err := sanitize_tweet_text("s=‘ @TweetCartRunner ’\n  #include test  ", indices)
+		actual := sanitize_tweet_text("s=‘ @TweetCartRunner ’\n  #include test  ", indices)
 
-		test_assert_no_err(err, "error sanitizing tweet", t)
 		test_assert_eq(expected, actual, "", t)
 	}
 	//no erasure since its in quotes
 	{
 		expected := "s=\"@TweetCartRunner\""
 		indices := []twitter.Indices{twitter.Indices{3, 19}}
-		actual, err := sanitize_tweet_text("s=\"@TweetCartRunner\"", indices)
-		test_assert_no_err(err, "error sanitizing tweet", t)
+		actual := sanitize_tweet_text("s=\"@TweetCartRunner\"", indices)
 		test_assert_eq(expected, actual, "", t)
 	}
 	//no erasure since its right after a quote
 	{
 		expected := "s='@TweetCartRunner\""
 		indices := []twitter.Indices{twitter.Indices{3, 19}}
-		actual, err := sanitize_tweet_text("s='@TweetCartRunner\"", indices)
-		test_assert_no_err(err, "error sanitizing tweet", t)
+		actual := sanitize_tweet_text("s='@TweetCartRunner\"", indices)
 		test_assert_eq(expected, actual, "", t)
 	}
 
@@ -211,8 +208,7 @@ func TestSanitizeTweet(t *testing.T) {
 	{
 		expected := "s=\"@TweetCartRunner\""
 		indices := []twitter.Indices{twitter.Indices{3, 19}, twitter.Indices{20, 36}}
-		actual, err := sanitize_tweet_text("s=\"@TweetCartRunner\"@TweetCartRunner", indices)
-		test_assert_no_err(err, "error sanitizing tweet", t)
+		actual := sanitize_tweet_text("s=\"@TweetCartRunner\"@TweetCartRunner", indices)
 		test_assert_eq(expected, actual, "", t)
 	}
 
@@ -276,11 +272,6 @@ func TestGenerateGif(t *testing.T) {
 	commonGenerateGif(large_gif, t)
 }
 
-//type TweetCartRunnerPersistentState struct {
-//last_tweet_id int64
-//tweet_ids_in_progress map[int64]bool
-//}
-
 func TestPersistThread(t *testing.T) {
 	test_file := "test_persist.json"
 	os.Remove(test_file)
@@ -291,8 +282,11 @@ func TestPersistThread(t *testing.T) {
 	processed_tweet_ids := make(chan int64)
 	status_channel := make(chan int)
 
+	dms_in_progress := make(chan *DMCart)
+	processed_dm_ids := make(chan string)
+
 	//TODO need some sort of sync channel
-	go perstisting_thread(tweet_ids_in_progress, processed_tweet_ids, state, status_channel, test_file)
+	go perstisting_thread(tweet_ids_in_progress, processed_tweet_ids, dms_in_progress, processed_dm_ids, state, status_channel, test_file)
 
 	current_tweet_id := int64(123)
 	tweet_ids_in_progress <- current_tweet_id
@@ -307,7 +301,7 @@ func TestPersistThread(t *testing.T) {
 
 	file_contents, err := ioutil.ReadFile(test_file)
 	test_assert_eq(nil, err, "persist file should exist", t)
-	test_assert_eq(`{"LastTweetID":0,"TweetIDsInProgress":{"123":true}}`, string(file_contents), "Bad file contents in persist file", t)
+	test_assert_eq(`{"LastTweetID":0,"TweetIDsInProgress":{"123":true},"LastDMID":0,"DMsInProgress":{}}`, string(file_contents), "Bad file contents in persist file", t)
 
 	processed_tweet_ids <- current_tweet_id
 
@@ -321,5 +315,41 @@ func TestPersistThread(t *testing.T) {
 
 	file_contents, err = ioutil.ReadFile(test_file)
 	test_assert_eq(nil, err, "persist file should exist", t)
-	test_assert_eq(`{"LastTweetID":123,"TweetIDsInProgress":{}}`, string(file_contents), "Bad file contents in persist file", t)
+	test_assert_eq(`{"LastTweetID":123,"TweetIDsInProgress":{},"LastDMID":0,"DMsInProgress":{}}`, string(file_contents), "Bad file contents in persist file", t)
+
+	current_dm := DMCart{
+		DMID:   "321",
+		DMText: "Hello!",
+		Sender: User{Id: "abc", ScreenName: "TestUser"},
+	}
+
+	dms_in_progress <- &current_dm
+
+	status = <-status_channel
+	test_assert_eq(PTS_STATE_PERSISTED, status, "", t)
+
+	test_assert_eq(int64(0), state.LastDMID, "Should not be updated for in progress dms", t)
+	dm, ok := state.DMsInProgress[current_dm.DMID]
+	test_assert_eq(true, ok, "Should be recorded as in progress", t)
+	test_assert_eq(dm, &current_dm, "Should be recorded as in progress", t)
+
+	file_contents, err = ioutil.ReadFile(test_file)
+	test_assert_eq(nil, err, "persist file should exist", t)
+	test_assert_eq(`{"LastTweetID":123,"TweetIDsInProgress":{},"LastDMID":0,"DMsInProgress":{"321":{"DMID":"321","DMText":"Hello!","Sender":{"id":"abc","screen_name":"TestUser"}}}}`, string(file_contents), "Bad file contents in persist file", t)
+
+	processed_dm_ids <- current_dm.DMID
+
+	status = <-status_channel
+	test_assert_eq(PTS_STATE_PERSISTED, status, "", t)
+
+	test_assert_eq(current_dm.DMID, strconv.Itoa(int(state.LastDMID)), "Should be updated for processed dms", t)
+	dm, ok = state.DMsInProgress[current_dm.DMID]
+	test_assert_eq(false, ok, "Should no longer be in progress", t)
+	var nil_cart *DMCart
+	test_assert_eq(nil_cart, dm, "Should no longer be in progress", t)
+
+	file_contents, err = ioutil.ReadFile(test_file)
+	test_assert_eq(nil, err, "persist file should exist", t)
+	test_assert_eq(`{"LastTweetID":123,"TweetIDsInProgress":{},"LastDMID":321,"DMsInProgress":{}}`, string(file_contents), "Bad file contents in persist file", t)
+
 }

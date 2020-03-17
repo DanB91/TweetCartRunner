@@ -25,12 +25,6 @@ import (
 
 const (
 	WEBHOOK_PATH = "/webhook"
-	DM_ID_PREFIX = "dm"
-)
-
-var (
-	TWITTER_ACCOUNT_ACTIVITY = "https://api.twitter.com/1.1/account_activity/all/" + WEBHOOK_ENV_NAME
-	WEBHOOK_URL              = "https://" + WEBHOOK_DOMAIN_NAME + WEBHOOK_PATH
 )
 
 type DirectMessage struct {
@@ -55,9 +49,9 @@ type DirectMessageEvents struct {
 }
 
 type DMCart struct {
-	dm_id   string
-	dm_text string
-	sender  User
+	DMID   string
+	DMText string
+	Sender User
 }
 
 type DMHanderContext struct {
@@ -65,8 +59,10 @@ type DMHanderContext struct {
 	goroutine_context          context.Context
 	program_handling_semaphore *semaphore.Weighted
 	twitter_client             *twitter.Client
-	this_user                  *twitter.User
-	dm_channel                 chan DMCart
+	my_user                    *twitter.User
+	dm_channel                 chan *DMCart
+	dms_in_progress            chan *DMCart
+	processed_dm_ids           chan string
 }
 
 func (dm_context *DMHanderContext) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
@@ -74,7 +70,6 @@ func (dm_context *DMHanderContext) ServeHTTP(writer http.ResponseWriter, req *ht
 	if req.ContentLength > 0 {
 		buf.Grow(int(req.ContentLength))
 	}
-	dm_cart := DMCart{}
 
 	_, err := buf.ReadFrom(req.Body)
 	if err != nil {
@@ -115,12 +110,13 @@ func (dm_context *DMHanderContext) ServeHTTP(writer http.ResponseWriter, req *ht
 			continue
 		}
 
-		if sender.ScreenName == dm_context.this_user.ScreenName {
+		if sender.ScreenName == dm_context.my_user.ScreenName {
 			continue
 		}
-		dm_cart.dm_text = dm_event.Message.MessageData.Text
-		dm_cart.dm_id = DM_ID_PREFIX + dm_event.Id
-		dm_cart.sender = sender
+		dm_cart := &DMCart{}
+		dm_cart.DMText = dm_event.Message.MessageData.Text
+		dm_cart.DMID = dm_event.Id
+		dm_cart.Sender = sender
 		dm_context.dm_channel <- dm_cart
 	}
 
@@ -134,13 +130,120 @@ func dm_event_loop(dm_context *DMHanderContext) {
 			log.Print("Error acquiring semaphore: ", err)
 			continue
 		}
+		tmp_dm_cart := dm_cart
 		go func() {
-			//TODO
-			// handler.dm_ids_in_process <- dm_id
-			handle_dm(dm_cart.dm_id, dm_cart.dm_text, dm_cart.sender, dm_context)
+			dm_context.dms_in_progress <- tmp_dm_cart
+			handle_dm(tmp_dm_cart.DMID, tmp_dm_cart.DMText, tmp_dm_cart.Sender, dm_context)
+			dm_context.processed_dm_ids <- tmp_dm_cart.DMID
 			dm_context.program_handling_semaphore.Release(1)
-			// handler.processed_dm_ids <- dm_id
 		}()
+	}
+}
+func user_screen_names_from_dms(twitter_client *twitter.Client, dms []twitter.DirectMessageEvent) map[string]string {
+
+	ret := make(map[string]string, len(dms))
+	users := make([]twitter.User, 100)
+	ids_to_lookup := make([]int64, 0, 100) //max 100 per api call
+
+	for i := 0; i < len(dms); i += 100 {
+		max_len := 0
+		if len(dms[i:]) > 100 {
+			max_len = 100
+		} else {
+			max_len = len(dms)
+		}
+		for _, dm := range dms[i : i+max_len] {
+			sender_id, err := strconv.Atoi(dm.Message.SenderID)
+			if err != nil {
+				log.Fatalf("User id is not a number! It is %v. Exiting due to DM %v", dm.Message.SenderID, dm.ID)
+			}
+			ids_to_lookup = append(ids_to_lookup, int64(sender_id))
+		}
+		api_func := func() (interface{}, error) {
+			lookup_params := &twitter.UserLookupParams{
+				UserID:          ids_to_lookup,
+				ScreenName:      nil,
+				IncludeEntities: twitter.Bool(false),
+			}
+			user_lookup, _, err := twitter_client.Users.Lookup(lookup_params)
+			return user_lookup, err
+		}
+		user_lookup_int, _ := execute_twitter_api(api_func, "Failed to lookup users for dms", true)
+		tmp_users := user_lookup_int.([]twitter.User)
+		users = append(users, tmp_users...)
+		ids_to_lookup = ids_to_lookup[:0]
+	}
+	for _, user := range users {
+		ret[user.IDStr] = user.ScreenName
+	}
+	return ret
+}
+func process_missed_dms(tc *twitter.Client, my_user *twitter.User, persistent_state *TweetCartRunnerPersistentState,
+	dm_cart_channel chan *DMCart) {
+	log.Print("Loading missed dms...")
+	for _, dm_cart := range persistent_state.DMsInProgress {
+		dm_cart_channel <- dm_cart
+	}
+	if persistent_state.LastDMID == 0 {
+		log.Print("Done!")
+		return
+	}
+
+	const buffer_size = 20
+	total_loaded_dms := 0
+	last_dm_id := persistent_state.LastDMID
+	params := &twitter.DirectMessageEventsListParams{Count: 50}
+	cursor := ""
+	for {
+		params.Cursor = cursor
+		api_func := func() (interface{}, error) {
+			log.Print("Since DM id: ", last_dm_id)
+
+			dms, _, err := tc.DirectMessages.EventsList(params)
+			return dms, err
+		}
+
+		dms_int, err := execute_twitter_api(api_func, "Cannot dms sent before bring up.  Exiting...", true)
+		if err != nil {
+			//should never get here
+			return
+		}
+		dms := dms_int.(*twitter.DirectMessageEvents)
+		if len(dms.Events) == 0 {
+			log.Print("Attempted to load ", total_loaded_dms, " dms")
+			return
+		}
+		user_ids_to_screen_names := user_screen_names_from_dms(tc, dms.Events)
+		for _, dm := range dms.Events {
+			if dm.ID == strconv.Itoa(int(persistent_state.LastDMID)) {
+				log.Print("Attempted to load ", total_loaded_dms, " dms")
+				return
+			}
+			if dm.Type != "message_create" {
+				continue
+			}
+			if dm.Message.SenderID == my_user.IDStr {
+				continue
+			}
+			//TODO potential race condition
+			if _, does_contain := persistent_state.DMsInProgress[dm.ID]; does_contain {
+				continue
+			}
+			dm_cart := &DMCart{}
+			dm_cart.DMID = dm.ID
+			dm_cart.DMText = dm.Message.Data.Text
+			dm_cart.Sender.Id = dm.Message.SenderID
+			if screen_name, ok := user_ids_to_screen_names[dm.Message.SenderID]; ok {
+				dm_cart.Sender.ScreenName = screen_name
+			} else {
+				log.Printf("User %v ID does not exist. Skipping DM id %v", dm.Message.SenderID, dm.ID)
+				continue
+			}
+			dm_cart_channel <- dm_cart
+			total_loaded_dms++
+
+		}
+
 	}
 }
 
@@ -283,7 +386,7 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 	}
 	tweet := tweet_int.(*twitter.Tweet)
 
-	cart_tweets := divide_cart_up_into_tweets(sanitized_text, handler.this_user.ScreenName)
+	cart_tweets := divide_cart_up_into_tweets(sanitized_text, handler.my_user.ScreenName)
 	for _, cart_tweet := range cart_tweets {
 		api_func := func() (interface{}, error) {
 			status_update_params := &twitter.StatusUpdateParams{
@@ -303,13 +406,13 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 		}
 		_, err := execute_twitter_api(api_func, "Error posting cart from DM!", false)
 		if err != nil {
-			send_dm(fmt.Sprintf("I have successfully ran your program! But there was an error posting your source code. I posted your program here: https://twitter.com/%v/status/%v",
+			send_dm(fmt.Sprintf("I have successfully ran your program! But there was an error posting your source code. I posted your program here. https://twitter.com/%v/status/%v",
 				sender.Id, tweet.IDStr), sender, handler.twitter_client)
 			return
 		}
 	}
 
-	send_dm(fmt.Sprintf("I have successfully ran your program!  I posted it here along with the source code: https://twitter.com/%v/status/%v",
+	send_dm(fmt.Sprintf("I have successfully ran your program!  I posted it here along with the source code. https://twitter.com/%v/status/%v",
 		sender.Id, tweet.IDStr), sender, handler.twitter_client)
 
 }
@@ -439,8 +542,19 @@ func register_welcome_message(twitter_client *twitter.Client) {
 	log.Print("Done!")
 
 }
+func dm_id_to_int(dm_id string) int64 {
+	if dm_id_num, err := strconv.Atoi(dm_id); err == nil {
+		return int64(dm_id_num)
+	} else {
+		log.Fatal("DM ID is not a number, we need to handle this..., DM ID: ", dm_id)
+	}
+
+	panic("Should not get here")
+}
 func init_dm_listener(consumer_secret string, http_client *http.Client,
-	twitter_client *twitter.Client, this_user *twitter.User,
+	twitter_client *twitter.Client, my_user *twitter.User,
+	dms_in_progress chan *DMCart, processed_dm_ids chan string,
+	persistent_state *TweetCartRunnerPersistentState,
 	ctx context.Context, program_handling_semaphore *semaphore.Weighted) {
 	list, _, err := twitter_client.DirectMessages.WelcomeMessageList(nil)
 	if err != nil {
@@ -465,11 +579,15 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 		goroutine_context:          ctx,
 		program_handling_semaphore: program_handling_semaphore,
 		twitter_client:             twitter_client,
-		this_user:                  this_user,
-		dm_channel:                 make(chan DMCart, 256),
+		my_user:                    my_user,
+		dm_channel:                 make(chan *DMCart, 256),
+		dms_in_progress:            dms_in_progress,
+		processed_dm_ids:           processed_dm_ids,
 	}
 
 	go dm_event_loop(&dm_context)
+
+	process_missed_dms(twitter_client, my_user, persistent_state, dm_context.dm_channel)
 
 	mux := http.NewServeMux()
 	mux.Handle(WEBHOOK_PATH, &dm_context)
