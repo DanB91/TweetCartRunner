@@ -592,7 +592,7 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 	mux := http.NewServeMux()
 	mux.Handle(WEBHOOK_PATH, &dm_context)
 
-	listener, err := net.Listen("tcp", ":12345")
+	listener, err := net.Listen("tcp", ":443")
 	cfg := &tls.Config{
 		MinVersion:               tls.VersionTLS12,
 		CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
@@ -618,7 +618,7 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 		},
 	}
 	srv := &http.Server{
-		Addr:         ":12345",
+		Addr:         ":443",
 		Handler:      mux,
 		TLSConfig:    cfg,
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler), 0),
