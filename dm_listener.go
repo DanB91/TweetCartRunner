@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"twitter"
 	"unicode"
 	"unicode/utf8"
@@ -551,6 +552,24 @@ func dm_id_to_int(dm_id string) int64 {
 
 	panic("Should not get here")
 }
+
+func wait_for_server_to_come_up() {
+	var err error
+	for i := 0; i < 3; i++ {
+		timeout := time.Second
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(WEBHOOK_DOMAIN_NAME, "443"), timeout)
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if conn != nil {
+			conn.Close()
+			return
+		}
+	}
+
+	log.Fatal("HTTPS server failed to come up. Exiting... Reason: ", err)
+}
 func init_dm_listener(consumer_secret string, http_client *http.Client,
 	twitter_client *twitter.Client, my_user *twitter.User,
 	dms_in_progress chan *DMCart, processed_dm_ids chan string,
@@ -627,7 +646,7 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 		log.Fatal("Error listening on port for webhook: ", err)
 	}
 	go func() { log.Fatal(srv.ServeTLS(listener, "tls/server.crt", "tls/server.key")) }()
-	//wait_for_webhook_to_come_up()
+	wait_for_webhook_to_come_up()
 	delete_all_current_webhooks(http_client)
 
 	log.Println("Registering webhook...")

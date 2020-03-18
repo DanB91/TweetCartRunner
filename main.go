@@ -655,7 +655,7 @@ finish()`,
 		}
 	}()
 	user, err := user.Current()
-	pico8_command := exec.Command(PICO_8_EXEC_PATH, "-run", tweet_id_str+".p8")
+	pico8_command := exec.Command(PICO_8_EXEC_PATH, "-run", tweet_id_str+".p8", "-desktop", user.HomeDir+"/Desktop/")
 	stdout, err := pico8_command.StdoutPipe()
 	if err != nil {
 		log.Print("Error getting stdout from ", PICO_8_EXEC_PATH, "Reason: ", err)
