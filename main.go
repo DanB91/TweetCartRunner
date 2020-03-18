@@ -417,7 +417,7 @@ func execute_twitter_api(api func() (interface{}, error), error_msg string, is_f
 
 }
 
-var APPROX_FUNCTION_CALL_REGEX = regexp.MustCompile(`\w*([\w, '"]*)`)
+var APPROX_FUNCTION_CALL_REGEX = regexp.MustCompile(`\w+?\(([\w'"{}\[\]]*?(, *?)*?)*?\)`)
 
 func is_probably_code(tweet string) bool {
 	return APPROX_FUNCTION_CALL_REGEX.MatchString(tweet) || strings.Contains(tweet, "=") ||
