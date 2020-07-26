@@ -619,6 +619,7 @@ function flip()
     state.flip()
 end
 %v
+if not _draw then
 function finish()
  local state = __state_%v__
  local start = state.t()
@@ -632,7 +633,8 @@ function finish()
  state.extcmd('video')
  state.printh('%v')
 end
-finish()`,
+finish()
+end`,
 			tweet_id_str,
 			tweet_id_str,
 			done_str,
