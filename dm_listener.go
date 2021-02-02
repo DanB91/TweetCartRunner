@@ -248,7 +248,6 @@ func process_missed_dms(tc *twitter.Client, my_user *twitter.User, persistent_st
 	}
 }
 
-//returns true if successful, else false
 func send_dm(dm_text string, to User, twitter_client *twitter.Client) {
 	//TODO: loop that reads from channel?
 	api_func := func() (interface{}, error) {
@@ -257,6 +256,24 @@ func send_dm(dm_text string, to User, twitter_client *twitter.Client) {
 				Message: &twitter.DirectMessageEventMessage{
 					Target: &twitter.DirectMessageTarget{RecipientID: to.Id},
 					Data:   &twitter.DirectMessageData{Text: dm_text}}}}
+		new_event, _, err := twitter_client.DirectMessages.EventsNew(&new_dm_params)
+		return new_event, err
+	}
+	_, err := execute_twitter_api(api_func, "", false)
+	if err != nil {
+		log.Printf("Failed to send DM \"%v\" to user %v. Reason: %v", dm_text, to.ScreenName, err)
+	}
+}
+func send_dm_with_gif(dm_text string, to User, gif_id int64, twitter_client *twitter.Client) {
+	//TODO: loop that reads from channel?
+	api_func := func() (interface{}, error) {
+		new_dm_params := twitter.DirectMessageEventsNewParams{
+			Event: &twitter.DirectMessageEvent{Type: "message_create",
+				Message: &twitter.DirectMessageEventMessage{
+					Target: &twitter.DirectMessageTarget{RecipientID: to.Id},
+					Data: &twitter.DirectMessageData{Text: dm_text,
+						Attachment: &twitter.DirectMessageDataAttachment{Type: "media",
+							Media: twitter.MediaEntity{ID: gif_id}}}}}}
 		new_event, _, err := twitter_client.DirectMessages.EventsNew(&new_dm_params)
 		return new_event, err
 	}
@@ -343,9 +360,14 @@ func divide_cart_up_into_tweets(cart, my_screen_name string) []string {
 
 }
 func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
-	go send_dm("Your code is being run.  I will DM you once it's finished!", sender, handler.twitter_client)
-
 	sanitized_text := sanitize_tweet_text(dm_text, nil)
+	is_notweet := strings.HasPrefix(sanitized_text, "--notweet")
+	if is_notweet {
+		go send_dm("Your code is being run and will not be tweeted.  I will DM you once it's finished!", sender, handler.twitter_client)
+	} else {
+		go send_dm("Your code is being run.  I will DM you once it's finished!", sender, handler.twitter_client)
+	}
+
 	gif_data, err := run_pico8_and_generate_gif(sanitized_text, dm_id)
 	if err != nil {
 		msg := `I was unable to generate the GIF of your program. Possible reasons:
@@ -357,64 +379,69 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 		log.Printf("Failed generate for DM gif. Dropping... Reason: %v", err)
 		return
 	}
-
 	gif_id, err := upload_gif(gif_data, handler.twitter_client)
 	if err != nil {
 		log.Print("Could not upload GIF! Error: ", err)
 		send_dm("An internal error has occurred.  Please try back later.", sender, handler.twitter_client)
 		return
 	}
-	api_func := func() (interface{}, error) {
-		status_update_params := &twitter.StatusUpdateParams{
-			Status:             "",
-			InReplyToStatusID:  0,
-			PossiblySensitive:  twitter.Bool(false),
-			Lat:                nil,
-			Long:               nil,
-			PlaceID:            "",
-			DisplayCoordinates: twitter.Bool(false),
-			TrimUser:           twitter.Bool(true),
-			MediaIds:           []int64{gif_id},
-			TweetMode:          "extended",
-		}
-		tweet, _, err := handler.twitter_client.Statuses.Update("By @"+sender.ScreenName, status_update_params)
-		return tweet, err
-	}
-	tweet_int, err := execute_twitter_api(api_func, "Error posting GIF tweet of DM!", false)
-	if err != nil {
-		send_dm("There was an error posting your program.  Please try back later.", sender, handler.twitter_client)
-		return
-	}
-	tweet := tweet_int.(*twitter.Tweet)
-
-	cart_tweets := divide_cart_up_into_tweets(sanitized_text, handler.my_user.ScreenName)
-	for _, cart_tweet := range cart_tweets {
+	if !is_notweet {
 		api_func := func() (interface{}, error) {
 			status_update_params := &twitter.StatusUpdateParams{
 				Status:             "",
-				InReplyToStatusID:  tweet.ID,
+				InReplyToStatusID:  0,
 				PossiblySensitive:  twitter.Bool(false),
 				Lat:                nil,
 				Long:               nil,
 				PlaceID:            "",
 				DisplayCoordinates: twitter.Bool(false),
 				TrimUser:           twitter.Bool(true),
-				MediaIds:           nil,
+				MediaIds:           []int64{gif_id},
 				TweetMode:          "extended",
 			}
-			tweet, _, err := handler.twitter_client.Statuses.Update(cart_tweet, status_update_params)
+			tweet, _, err := handler.twitter_client.Statuses.Update("By @"+sender.ScreenName, status_update_params)
 			return tweet, err
 		}
-		_, err := execute_twitter_api(api_func, "Error posting cart from DM!", false)
+		tweet_int, err := execute_twitter_api(api_func, "Error posting GIF tweet of DM!", false)
 		if err != nil {
-			send_dm(fmt.Sprintf("I have successfully ran your program! But there was an error posting your source code. I posted your program here. https://twitter.com/%v/status/%v",
-				sender.Id, tweet.IDStr), sender, handler.twitter_client)
+			send_dm("There was an error posting your program.  Please try back later.", sender, handler.twitter_client)
 			return
 		}
-	}
+		tweet := tweet_int.(*twitter.Tweet)
 
-	send_dm(fmt.Sprintf("I have successfully ran your program!  I posted it here along with the source code. https://twitter.com/%v/status/%v",
-		sender.Id, tweet.IDStr), sender, handler.twitter_client)
+		cart_tweets := divide_cart_up_into_tweets(sanitized_text, handler.my_user.ScreenName)
+		for _, cart_tweet := range cart_tweets {
+			api_func := func() (interface{}, error) {
+				status_update_params := &twitter.StatusUpdateParams{
+					Status:             "",
+					InReplyToStatusID:  tweet.ID,
+					PossiblySensitive:  twitter.Bool(false),
+					Lat:                nil,
+					Long:               nil,
+					PlaceID:            "",
+					DisplayCoordinates: twitter.Bool(false),
+					TrimUser:           twitter.Bool(true),
+					MediaIds:           nil,
+					TweetMode:          "extended",
+				}
+				tweet, _, err := handler.twitter_client.Statuses.Update(cart_tweet, status_update_params)
+				return tweet, err
+			}
+			_, err := execute_twitter_api(api_func, "Error posting cart from DM!", false)
+			if err != nil {
+				send_dm(fmt.Sprintf("I have successfully ran your program! But there was an error posting your source code. I posted your program here. https://twitter.com/%v/status/%v",
+					sender.Id, tweet.IDStr), sender, handler.twitter_client)
+				return
+			}
+		}
+
+		send_dm(fmt.Sprintf("I have successfully ran your program!  I posted it here along with the source code. https://twitter.com/%v/status/%v",
+			sender.Id, tweet.IDStr), sender, handler.twitter_client)
+
+	} else {
+		send_dm_with_gif("I have successfully ran your program!  Here is the result: ", sender, gif_id, handler.twitter_client)
+
+	}
 
 }
 func register_webhook(http_client *http.Client) {
@@ -527,7 +554,9 @@ func register_welcome_message(twitter_client *twitter.Client) {
 		Simply DM me your PICO-8 code and I'll run it and will post the tweet of the following:
 			- An 8-second GIF of it running.
 			- Tagging you as the author.
-			- Reply to this tweet with the source code.`,
+			- Reply to this tweet with the source code.
+			
+		Want to see how your GIF will look without me tweeting it? Have your code start with the comment: --notweet and I'll DM you the GIF!`,
 		},
 		Name: "Default Message"}
 	msg, _, err := twitter_client.DirectMessages.WelcomeMessageNew(&welcome_message_params)
