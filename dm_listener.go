@@ -613,7 +613,7 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 	if len(list.WelcomeMessages) == 0 {
 		register_welcome_message(twitter_client)
 
-	} else if len(list.WelcomeMessages) > 1 {
+	} else {
 		for _, msg := range list.WelcomeMessages {
 			_, err := twitter_client.DirectMessages.WelcomeMessageDestroy(msg.ID)
 
