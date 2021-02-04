@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"twitter"
 	"unicode"
@@ -674,7 +676,20 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 	if err != nil {
 		log.Fatal("Error listening on port for webhook: ", err)
 	}
+
+	//start web server!
 	go func() { log.Fatal(srv.ServeTLS(listener, "tls/server.crt", "tls/server.key")) }()
+
+	//delete all webhooks on shutdown
+	signal_channel := make(chan os.Signal)
+	signal.Notify(signal_channel, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-signal_channel
+		log.Printf("Received signal %v.  Deleting all webhooks and then going down...", sig)
+		delete_all_current_webhooks(http_client)
+		srv.Shutdown(ctx)
+	}()
+
 	wait_for_webhook_to_come_up()
 	delete_all_current_webhooks(http_client)
 
