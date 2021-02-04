@@ -367,7 +367,7 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 	if is_notweet {
 		go send_dm("Your code is being run and will not be tweeted.  I will DM you once it's finished!", sender, handler.twitter_client)
 	} else {
-		go send_dm("Your code is being run.  I will DM you once it's finished!", sender, handler.twitter_client)
+		go send_dm("Your code is being run and will be tweeted when finished.  I will DM you once it's finished!", sender, handler.twitter_client)
 	}
 
 	gif_data, err := run_pico8_and_generate_gif(sanitized_text, dm_id)
