@@ -424,9 +424,9 @@ func is_probably_code(tweet string) bool {
 		strings.Contains(tweet, "?'") || strings.Contains(tweet, "?\"")
 }
 
-func upload_gif(gif_data []byte, tc *twitter.Client) (int64, error) {
+func upload_gif(gif_data []byte, tc *twitter.Client, category string) (int64, error) {
 	api_func := func() (interface{}, error) {
-		upload_result, _, err := tc.Media.Upload(gif_data, "image/gif", "tweet_gif")
+		upload_result, _, err := tc.Media.Upload(gif_data, "image/gif", category)
 		return upload_result, err
 	}
 	upload_result_int, err := execute_twitter_api(api_func, "Error uploading gif", false)
@@ -542,7 +542,7 @@ I was unable to generate the GIF of your tweetcart. Possible reasons:
 		return
 	}
 
-	gif_id, err := upload_gif(gif_data, tc)
+	gif_id, err := upload_gif(gif_data, tc, "tweet_gif")
 	if err != nil {
 		log.Print(err)
 		return
