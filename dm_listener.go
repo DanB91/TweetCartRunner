@@ -381,13 +381,13 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 		log.Printf("Failed generate for DM gif. Dropping... Reason: %v", err)
 		return
 	}
-	gif_id, err := upload_gif(gif_data, handler.twitter_client)
-	if err != nil {
-		log.Print("Could not upload GIF! Error: ", err)
-		send_dm("An internal error has occurred.  Please try back later.", sender, handler.twitter_client)
-		return
-	}
 	if !is_notweet {
+		gif_id, err := upload_gif(gif_data, handler.twitter_client, "tweet_gif")
+		if err != nil {
+			log.Print("Could not upload GIF! Error: ", err)
+			send_dm("An internal error has occurred.  Please try back later.", sender, handler.twitter_client)
+			return
+		}
 		api_func := func() (interface{}, error) {
 			status_update_params := &twitter.StatusUpdateParams{
 				Status:             "",
@@ -441,6 +441,12 @@ func handle_dm(dm_id, dm_text string, sender User, handler *DMHanderContext) {
 			sender.Id, tweet.IDStr), sender, handler.twitter_client)
 
 	} else {
+		gif_id, err := upload_gif(gif_data, handler.twitter_client, "dm_gif")
+		if err != nil {
+			log.Print("Could not upload GIF! Error: ", err)
+			send_dm("An internal error has occurred.  Please try back later.", sender, handler.twitter_client)
+			return
+		}
 		send_dm_with_gif("I have successfully ran your program!  Here is the result: ", sender, gif_id, handler.twitter_client)
 
 	}
