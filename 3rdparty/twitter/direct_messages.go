@@ -144,6 +144,15 @@ func (s *DirectMessageService) WelcomeMessageDestroy(id string) (*http.Response,
 	return resp, relevantError(err, *apiError)
 }
 
+type DirectMessageWelcomeMessageRuleListParams struct {
+	Cursor string `url:"cursor,omitempty"`
+	Count  int    `url:"count,omitempty"`
+}
+
+type DirectMessageWelcomeMessageRules struct {
+	WelcomeMessageRules []DirectMessageWelcomeMessageRule `json:"welcome_message_rules"`
+	NextCursor          string                            `json:"next_cursor"`
+}
 type DirectMessageWelcomeMessageRule struct {
 	ID               string `json:"id"`
 	CreatedTimeStamp string `json:"created_timestamp"`
@@ -163,6 +172,22 @@ func (s *DirectMessageService) WelcomeMessageRuleNew(id string) (*DirectMessageW
 	apiError := new(APIError)
 	resp, err := s.sling.New().Post("welcome_messages/rules/new.json").BodyJSON(params).Receive(&wrap, apiError)
 	return &wrap.Rule, resp, relevantError(err, *apiError)
+}
+
+func (s *DirectMessageService) WelcomeMessageRuleList(params *DirectMessageWelcomeMessageRuleListParams) (*DirectMessageWelcomeMessageRules, *http.Response, error) {
+	message_rules := &DirectMessageWelcomeMessageRules{}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Get("welcome_messages/rules/list.json").QueryStruct(params).Receive(message_rules, apiError)
+	return message_rules, resp, relevantError(err, *apiError)
+}
+
+func (s *DirectMessageService) WelcomeMessageRuleDestroy(id string) (*http.Response, error) {
+	params := struct {
+		ID string `url:"id,omitempty"`
+	}{id}
+	apiError := new(APIError)
+	resp, err := s.sling.New().Delete("welcome_messages/rules/destroy.json").QueryStruct(params).Receive(nil, apiError)
+	return resp, relevantError(err, *apiError)
 }
 
 ////END

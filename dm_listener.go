@@ -580,6 +580,37 @@ func register_welcome_message(twitter_client *twitter.Client) {
 	log.Print("Done!")
 
 }
+func delete_all_welcome_messages(twitter_client *twitter.Client) {
+	//delete all messages
+	{
+		list, _, err := twitter_client.DirectMessages.WelcomeMessageList(nil)
+		if err != nil {
+			log.Fatal("Error listing welcome messages! Reason: ", err)
+		}
+		for _, msg := range list.WelcomeMessages {
+			_, err := twitter_client.DirectMessages.WelcomeMessageDestroy(msg.ID)
+
+			if err != nil {
+				log.Fatal("Error deleting welcome message! Reason: ", err)
+			}
+		}
+	}
+	//delete all message rules
+	{
+		list, _, err := twitter_client.DirectMessages.WelcomeMessageRuleList(nil)
+		if err != nil {
+			log.Fatal("Error listing welcome message rules! Reason: ", err)
+		}
+		for _, rule := range list.WelcomeMessageRules {
+			_, err := twitter_client.DirectMessages.WelcomeMessageRuleDestroy(rule.ID)
+
+			if err != nil {
+				log.Fatal("Error deleting welcome message rule! Reason: ", err)
+			}
+		}
+
+	}
+}
 func dm_id_to_int(dm_id string) int64 {
 	if dm_id_num, err := strconv.Atoi(dm_id); err == nil {
 		return int64(dm_id_num)
@@ -612,23 +643,8 @@ func init_dm_listener(consumer_secret string, http_client *http.Client,
 	dms_in_progress chan *DMCart, processed_dm_ids chan string,
 	persistent_state *TweetCartRunnerPersistentState,
 	ctx context.Context, program_handling_semaphore *semaphore.Weighted) {
-	list, _, err := twitter_client.DirectMessages.WelcomeMessageList(nil)
-	if err != nil {
-		log.Fatal("Error listing welcome messages! Reason: ", err)
-	}
-	if len(list.WelcomeMessages) == 0 {
-		register_welcome_message(twitter_client)
-
-	} else {
-		for _, msg := range list.WelcomeMessages {
-			_, err := twitter_client.DirectMessages.WelcomeMessageDestroy(msg.ID)
-
-			if err != nil {
-				log.Fatal("Error deleting welcome message! Reason: ", err)
-			}
-		}
-		register_welcome_message(twitter_client)
-	}
+	delete_all_welcome_messages(twitter_client)
+	register_welcome_message(twitter_client)
 
 	dm_context := DMHanderContext{
 		consumer_secret:            []byte(consumer_secret),
