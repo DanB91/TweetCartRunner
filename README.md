@@ -87,7 +87,7 @@ token secret
 
 ### Persistent State
 
-There will be times where you might want to bring down the bot for upgrading or other maintenance, but you don't want to miss any tweets that come in during that downtime. That's where persistent state comes in! This bot keeps a file called `persistent_state.json` which keeps track of 2 things:
+There will be times where you might want to bring down the bot for upgrading or other maintenance, but you don't want to miss any tweets that come in during that downtime. That's where persistent state comes in! This bot keeps a file called `persistent_state.json` which keeps track of 4 things:
 
 - `LastTweetID` -- This is the ID of the last successfully processed tweet.
 - `TweetIDsInProgress` -- A list of IDs of tweets that are being processed.  Try to make sure this list is empty before bringing down the bot (that is, if you are controlling when it goes down).
